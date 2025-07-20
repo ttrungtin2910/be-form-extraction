@@ -31,6 +31,9 @@ class ExtractFormData(BaseModel):
     status: str
     createAt: str
 
+class GetFormInfoData(BaseModel):
+    title: str
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -59,8 +62,10 @@ async def upload_image(
     file: UploadFile = File(...)
 ):
     logger.info("Received request to upload image")
+    logger.info(f"Status: {status}")
+    logger.info(f"File: {file.filename}, size: {file.size}, content_type: {file.content_type}")
     
-    ext = os.path.splitext(file.filename)[1].lower()
+    ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in [".jpg", ".jpeg", ".png", ".bmp", ".webp"]:
         logger.warning(f"Unsupported image format: {ext}")
         raise HTTPException(status_code=400, detail="Unsupported image format.")
@@ -93,7 +98,7 @@ async def upload_image(
     )
 
     try:
-        upsert_image(image_data.dict(), collection_name_image_detail, image_data.ImageName)
+        upsert_image(image_data, collection_name_image_detail, image_data.ImageName)
         logger.info(f"Saved image metadata to Firestore: {image_name}")
     except Exception as e:
         logger.error(f"Firestore save failed: {str(e)}")
@@ -106,7 +111,7 @@ async def create_or_update_image(data: ImageData):
     """
     Create or update an image record in Firestore.
     """
-    upsert_image(data, collection_name_image_detail)
+    upsert_image(data, collection_name_image_detail, data.ImageName)
     return {"message": "Image data saved successfully."}
 
 @app.get("/images/{image_name}", response_model=ImageData)
@@ -150,8 +155,32 @@ async def extract_form(data: ExtractFormData):
         result = await bot.analyze_ticket(local_path, "")
         logger.info(f"Analysis completed for {filename}")
 
-        upsert_image(result, collection_name_form_extract, filename)
+        # Ensure result is a dictionary
+        if not isinstance(result, dict):
+            logger.error(f"Analysis result is not a dictionary: {type(result)}")
+            result = {"error": "Invalid analysis result", "raw_result": str(result)}
+
+        # Convert result dict to proper format for form extraction
+        # Only include ImageData fields for the form extraction collection
+        form_data = {
+            "Status": "Completed",
+            "ImageName": filename,
+            "ImagePath": data.image,
+            "CreatedAt": data.createAt,
+            "analysis_result": result  # Store the full analysis result separately
+        }
+        upsert_image(form_data, collection_name_form_extract, filename)
         logger.info(f"Saved form extract metadata to Firestore: {collection_name_form_extract}")
+
+        # Update image status to Completed in imagedetail collection
+        image_data = ImageData(
+            Status="Completed",
+            ImageName=filename,
+            ImagePath=data.image,
+            CreatedAt=data.createAt
+        )
+        upsert_image(image_data, collection_name_image_detail, filename)
+        logger.info(f"Updated image status to Completed in Firestore: {filename}")
 
         os.remove(local_path)
         logger.info(f"Cleaned up local file: {local_path}")
@@ -167,26 +196,40 @@ async def extract_form(data: ExtractFormData):
         return {"error": str(e)}
     
 @app.post("/GetFormExtractInformation")
-async def get_form_extract_information(title: str = Form(...)):
+async def get_form_extract_information(data: GetFormInfoData):
     """
-    Receive an image title via FormData and fetch corresponding metadata
+    Receive an image title via JSON and fetch corresponding metadata
     from Firestore using the `get_image` helper function.
 
     Args:
-        title (str): The image title (document ID in Firestore)
+        data (GetFormInfoData): Object containing the image title
 
     Returns:
         JSON response containing image metadata or 404 if not found.
     """
-    # Call helper to fetch image data from Firestore
-    result = get_image(image_name=title, collection_name=collection_name_form_extract)
+    logger.info(f"Received request to get form extract information for title: {data.title}")
+    
+    try:
+        # Call helper to fetch image data from Firestore
+        result = get_image(image_name=data.title, collection_name=collection_name_form_extract)
+        logger.info(f"Firestore query result for {data.title}: {result is not None}")
 
-    # If no document found, raise 404
-    if not result:
-        raise HTTPException(status_code=404, detail="Image not found")
+        # If no document found, raise 404
+        if not result:
+            logger.warning(f"No form extract data found for title: {data.title}")
+            raise HTTPException(status_code=404, detail="Image not found")
 
-    # Return Firestore document as JSON
-    return result
+        # Return Firestore document as JSON
+        logger.info(f"Returning form extract data for {data.title}")
+        print(result)
+        return result
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error getting form extract information for {data.title}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 # ✅ This will run FastAPI when executing this file directly
 if __name__ == "__main__":

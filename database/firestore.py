@@ -23,15 +23,30 @@ class ImageData(BaseModel):
     CreatedAt: str
 
 
-def upsert_image(data: ImageData, collection_name: str, key_upload: str):
+def upsert_image(data, collection_name: str, key_upload: str):
     """
     Create or update an image document in Firestore.
 
     Args:
-        data (ImageData): Image metadata to be stored.
+        data: Image metadata to be stored (can be ImageData object or dict).
     """
     doc_ref = db.collection(collection_name).document(key_upload)
-    doc_ref.set(data)
+    
+    # Convert ImageData to dict if needed
+    if hasattr(data, 'dict'):
+        data_dict = data.dict()
+    elif isinstance(data, dict):
+        data_dict = data
+    elif hasattr(data, '__dict__'):
+        data_dict = data.__dict__
+    else:
+        # Fallback: convert to string representation
+        data_dict = {"data": str(data)}
+    
+    print(f"[Firestore] Upserting data type: {type(data)}")
+    print(f"[Firestore] Converted dict: {data_dict}")
+    
+    doc_ref.set(data_dict)
 
 
 def get_image(image_name: str, collection_name: str) -> Optional[dict]:
