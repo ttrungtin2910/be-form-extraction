@@ -40,7 +40,7 @@ app = FastAPI(title="Firestore Image Metadata API")
 
 class ExtractFormData(BaseModel):
     title: str
-    size: str
+    size: float
     image: str  # URL or base64 string, tùy frontend
     status: str
     createAt: str
@@ -111,12 +111,14 @@ async def upload_image(
         raise HTTPException(status_code=500, detail=f"GCS upload failed: {str(e)}")
 
     gcs_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{destination_blob_name}"
+    size_val = round((file.size or 0) / (1024 * 1024), 2)
     image_data = ImageData(
         Status=status,
         ImageName=image_name,
         ImagePath=gcs_url,
         CreatedAt=str_now,
         FolderPath=folderPath,
+        Size=size_val,
     )
 
     try:
@@ -159,14 +161,19 @@ async def remove_image(image_name: str):
 
 
 @app.get("/images/")
-async def get_all_images(folderPath: str = ""):
+async def get_all_images(folderPath: str = "", page: int = 1, limit: int = 20):
     """
     Retrieve image records. If folderPath provided, filter by that path (prefix match).
     """
     data = list_images(collection_name_image_detail)
     if folderPath:
         data = [d for d in data if d.get("FolderPath", "") == folderPath]
-    return data
+
+    total = len(data)
+    start = (page - 1) * limit
+    end = start + limit
+    data_page = data[start:end]
+    return {"data": data_page, "total": total}
 
 
 # Folder endpoints
@@ -230,6 +237,10 @@ async def extract_form(data: ExtractFormData):
             logger.error(f"Analysis result is not a dictionary: {type(result)}")
             result = {"error": "Invalid analysis result", "raw_result": str(result)}
 
+        # Retrieve existing image metadata to keep size
+        existing_meta = get_image(filename, collection_name_image_detail) or {}
+        size_val = existing_meta.get("Size", 0.0)
+
         # Convert result dict to proper format for form extraction
         # Only include ImageData fields for the form extraction collection
         form_data = {
@@ -238,6 +249,7 @@ async def extract_form(data: ExtractFormData):
             "ImagePath": data.image,
             "CreatedAt": data.createAt,
             "FolderPath": data.folderPath,
+            "Size": size_val,
             "analysis_result": result,  # Store the full analysis result separately
         }
         upsert_image(form_data, collection_name_form_extract, filename)
@@ -252,6 +264,7 @@ async def extract_form(data: ExtractFormData):
             ImagePath=data.image,
             CreatedAt=data.createAt,
             FolderPath=data.folderPath,
+            Size=size_val,
         )
         upsert_image(image_data, collection_name_image_detail, filename)
         logger.info(f"Updated image status to Completed in Firestore: {filename}")

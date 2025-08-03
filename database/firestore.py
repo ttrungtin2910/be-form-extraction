@@ -24,6 +24,7 @@ class ImageData(BaseModel):
     ImagePath: str
     CreatedAt: str
     FolderPath: str = ""
+    Size: float = 0.0
 
 
 def upsert_image(data, collection_name: str, key_upload: str):
@@ -125,7 +126,19 @@ def delete_folder(path: str):
     # Delete folder doc
     db.collection(FOLDER_COLLECTION).document(_encode_path(path)).delete()
 
-    # Collections to purge
+    # Delete subfolder docs
+    subfolder_docs = (
+        db.collection(FOLDER_COLLECTION)
+        .where("FolderPath", ">=", path + "/")
+        .where("FolderPath", "<=", path + "/\uf8ff")
+        .stream()
+    )
+    batch_sub = db.batch()
+    for doc in subfolder_docs:
+        batch_sub.delete(doc.reference)
+    batch_sub.commit()
+
+    # Collections to purge (images)
     collections_to_clean = ["imagedetail", "forminformation"]
 
     for col in collections_to_clean:
