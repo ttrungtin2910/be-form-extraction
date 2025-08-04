@@ -39,12 +39,12 @@ app = FastAPI(title="Firestore Image Metadata API")
 
 
 class ExtractFormData(BaseModel):
-    title: str
-    size: float
-    image: str  # URL or base64 string, tùy frontend
-    status: str
-    createAt: str
-    folderPath: str = ""
+    FolderPath: str = ""
+    Status: str
+    ImagePath: str  # URL of the image
+    Size: float = 0.0
+    ImageName: str
+    CreatedAt: str
 
 
 class GetFormInfoData(BaseModel):
@@ -222,11 +222,11 @@ async def extract_form(data: ExtractFormData):
     logger.info("Received request to analyze image from frontend")
 
     try:
-        filename = extract_filename_from_url(data.image)
+        filename = data.ImageName
         local_path = os.path.join(UPLOAD_FOLDER, filename)
-        logger.info(f"Downloading image from {data.image} to {local_path}")
+        logger.info(f"Downloading image from {data.ImagePath} to {local_path}")
 
-        await download_image_from_url(data.image, local_path)
+        await download_image_from_url(data.ImagePath, local_path)
         logger.info(f"Download successful: {filename}")
 
         result = await bot.analyze_ticket(local_path, "")
@@ -237,18 +237,20 @@ async def extract_form(data: ExtractFormData):
             logger.error(f"Analysis result is not a dictionary: {type(result)}")
             result = {"error": "Invalid analysis result", "raw_result": str(result)}
 
-        # Retrieve existing image metadata to keep size
-        existing_meta = get_image(filename, collection_name_image_detail) or {}
-        size_val = existing_meta.get("Size", 0.0)
+        # Use the size from the request data, fallback to existing metadata if needed
+        size_val = data.Size
+        if size_val == 0.0:
+            existing_meta = get_image(filename, collection_name_image_detail) or {}
+            size_val = existing_meta.get("Size", 0.0)
 
         # Convert result dict to proper format for form extraction
         # Only include ImageData fields for the form extraction collection
         form_data = {
             "Status": "Completed",
-            "ImageName": filename,
-            "ImagePath": data.image,
-            "CreatedAt": data.createAt,
-            "FolderPath": data.folderPath,
+            "ImageName": data.ImageName,
+            "ImagePath": data.ImagePath,
+            "CreatedAt": data.CreatedAt,
+            "FolderPath": data.FolderPath,
             "Size": size_val,
             "analysis_result": result,  # Store the full analysis result separately
         }
@@ -260,10 +262,10 @@ async def extract_form(data: ExtractFormData):
         # Update image status to Completed in imagedetail collection
         image_data = ImageData(
             Status="Completed",
-            ImageName=filename,
-            ImagePath=data.image,
-            CreatedAt=data.createAt,
-            FolderPath=data.folderPath,
+            ImageName=data.ImageName,
+            ImagePath=data.ImagePath,
+            CreatedAt=data.CreatedAt,
+            FolderPath=data.FolderPath,
             Size=size_val,
         )
         upsert_image(image_data, collection_name_image_detail, filename)

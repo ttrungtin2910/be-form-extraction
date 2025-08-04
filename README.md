@@ -35,6 +35,11 @@ cd be-form-extraction
 ### 2. Install dependencies
 
 ```bash
+conda create -n be-form-extraction python=3.12
+conda activate be-form-extraction
+```
+
+```bash
 pip install -r requirements.txt
 ```
 
