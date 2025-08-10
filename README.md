@@ -110,6 +110,46 @@ Dùng lại prefork (khuyến nghị khi ở Python 3.12):
 $env:CELERY_FORCE_SOLO=0
 $env:CELERY_POOL=prefork
 python scripts/run_worker.py
+
+#### 🔧 Tăng concurrency để thấy nhiều task chạy đồng thời
+
+Mặc định Python 3.13 sẽ bị ép sang solo (1 task một lúc). Để Flower hiển thị nhiều task cùng Processing:
+
+1. (Khuyến nghị) Dùng Python 3.12 và prefork:
+```powershell
+$env:CELERY_FORCE_SOLO=0
+$env:CELERY_POOL='prefork'
+$env:CELERY_CONCURRENCY=6   # số tiến trình worker muốn
+python scripts/run_worker.py
+```
+
+2. Nếu vẫn ở Python 3.13 nhưng muốn thử prefork (có thể lỗi tùy phiên bản Celery/billiard):
+```powershell
+$env:CELERY_FORCE_SOLO=0
+$env:CELERY_POOL='prefork'
+$env:CELERY_CONCURRENCY=4
+python scripts/run_worker.py
+```
+
+3. Hoặc chạy nhiều worker solo song song (mỗi terminal một process):
+```powershell
+# Terminal 1
+python scripts/run_worker.py
+# Terminal 2
+python scripts/run_worker.py
+# ... mỗi process xử lý 1 task, tổng số task chạy đồng thời = số process
+```
+
+4. I/O-bound (gọi API) có thể thử eventlet/gevent (không bắt buộc):
+```powershell
+pip install eventlet
+$env:CELERY_POOL='eventlet'
+$env:CELERY_CONCURRENCY=50
+python scripts/run_worker.py
+```
+Lưu ý: Kiểm soát rate limit OpenAI / Google API, tránh vượt quota.
+
+Nếu thấy chỉ 1 task Active trong Flower: kiểm tra pool (solo) hoặc concurrency chưa đặt >1.
 ```
 
 ### 3. (Optional) Start Flower dashboard

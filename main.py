@@ -350,6 +350,22 @@ async def queue_extract_form(data: ExtractFormData):
     existing = get_image(data.ImageName, collection_name_image_detail)
     if not existing:
         raise HTTPException(status_code=404, detail="Image not found. Upload first.")
+    # Prevent duplicate enqueue if already processing
+    if existing.get("Status") == "Processing":
+        return {"status": "already_processing"}
+    # Mark status as Processing immediately so FE reload sees it
+    try:
+        processing_meta = ImageData(
+            Status="Processing",
+            ImageName=data.ImageName,
+            ImagePath=data.ImagePath or existing.get("ImagePath", ""),
+            CreatedAt=data.CreatedAt or existing.get("CreatedAt", ""),
+            FolderPath=data.FolderPath or existing.get("FolderPath", ""),
+            Size=data.Size or existing.get("Size", 0.0),
+        )
+        upsert_image(processing_meta, collection_name_image_detail, data.ImageName)
+    except Exception as e:  # non-fatal
+        logger.warning(f"Failed to pre-mark Processing for {data.ImageName}: {e}")
     task = extract_form_task.apply_async(args=[
         data.ImageName,
         data.ImagePath,

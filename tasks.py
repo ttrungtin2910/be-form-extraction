@@ -83,6 +83,21 @@ def extract_form_task(
     """Perform form extraction (OpenAI + Firestore updates)."""
     local_path = os.path.join(UPLOAD_FOLDER, image_name)
     try:
+        # Mark image status as Processing immediately (avoid duplicate clicks client-side)
+        try:
+            existing = get_image(image_name, collection_name_image_detail) or {}
+            processing_meta = ImageData(
+                Status="Processing",
+                ImageName=image_name,
+                ImagePath=image_url,
+                CreatedAt=created_at or existing.get("CreatedAt", ""),
+                FolderPath=folder_path or existing.get("FolderPath", ""),
+                Size=size or existing.get("Size", 0.0),
+            )
+            upsert_image(processing_meta, collection_name_image_detail, image_name)
+        except Exception:
+            # Non-fatal – continue extraction even if we cannot pre-mark
+            pass
         # Download image
         asyncio.run(download_image_from_url(image_url, local_path))
 
@@ -91,9 +106,10 @@ def extract_form_task(
         if not isinstance(result, dict):
             result = {"raw": str(result)}
 
-        # Determine size fallback
+        # Determine size fallback (reuse previously fetched existing if available)
         if not size:
-            existing = get_image(image_name, collection_name_image_detail) or {}
+            if 'existing' not in locals():
+                existing = get_image(image_name, collection_name_image_detail) or {}
             size = existing.get("Size", 0.0)
 
         # Save extraction result to forminformation collection

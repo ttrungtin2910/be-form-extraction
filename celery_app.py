@@ -28,11 +28,13 @@ def make_celery() -> Celery:
     # Tự động chuyển sang 'solo' nếu:
     #  - PYTHON >= 3.13 hoặc
     #  - đặt biến CELERY_FORCE_SOLO=1
-    force_solo = os.getenv("CELERY_FORCE_SOLO") == "1" or sys.version_info >= (3, 13)
-    if force_solo:
+    explicit_pool = os.getenv("CELERY_POOL")
+    force_solo = os.getenv("CELERY_FORCE_SOLO") == "1" or (
+        sys.version_info >= (3, 13) and not explicit_pool
+    )
+    if force_solo and not explicit_pool:
         # 'worker_pool' cấu hình nội bộ; tương đương tham số -P solo
         app.conf.worker_pool = "solo"
-        # Có thể giảm concurrency noise log
         os.environ.setdefault("CELERYD_FORCE_EXECV", "0")
     return app
 
