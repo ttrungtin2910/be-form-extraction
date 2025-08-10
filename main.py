@@ -28,6 +28,9 @@ from database.ggc_storage import (
 from utils.file_processing import download_image_from_url, extract_filename_from_url
 
 import logging
+from celery_app import celery_app
+from tasks import upload_image_task, extract_form_task
+from celery.result import AsyncResult
 
 # Configure logger
 logging.basicConfig(
@@ -48,7 +51,9 @@ class ExtractFormData(BaseModel):
 
 
 class GetFormInfoData(BaseModel):
-    title: str
+    # Accept either 'title' (original spec) or 'ImageName' (frontend usage) for flexibility
+    title: str | None = None
+    ImageName: str | None = None
 
 
 app.add_middleware(
@@ -297,35 +302,76 @@ async def get_form_extract_information(data: GetFormInfoData):
     Returns:
         JSON response containing image metadata or 404 if not found.
     """
+    name = data.title or data.ImageName
+    if not name:
+        raise HTTPException(status_code=422, detail="Missing 'title' or 'ImageName'")
     logger.info(
-        f"Received request to get form extract information for title: {data.title}"
+        f"Received request to get form extract information for title: {name}"
     )
 
     try:
         # Call helper to fetch image data from Firestore
         result = get_image(
-            image_name=data.title, collection_name=collection_name_form_extract
+            image_name=name, collection_name=collection_name_form_extract
         )
-        logger.info(f"Firestore query result for {data.title}: {result is not None}")
+        logger.info(f"Firestore query result for {name}: {result is not None}")
 
-        # If no document found, raise 404
         if not result:
-            logger.warning(f"No form extract data found for title: {data.title}")
+            logger.warning(f"No form extract data found for title: {name}")
             raise HTTPException(status_code=404, detail="Image not found")
 
-        # Return Firestore document as JSON
-        logger.info(f"Returning form extract data for {data.title}")
-        print(result)
+        logger.info(f"Returning form extract data for {name}")
         return result
-
     except HTTPException:
-        # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        logger.error(
-            f"Error getting form extract information for {data.title}: {str(e)}"
-        )
+        logger.error(f"Error getting form extract information for {name}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.post("/queue/upload-image")
+async def queue_upload_image(
+    status: str = Form(...), folderPath: str = Form(""), file: UploadFile = File(...)
+):
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in [".jpg", ".jpeg", ".png", ".bmp", ".webp"]:
+        raise HTTPException(status_code=400, detail="Unsupported image format.")
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    temp_name = f"enqueue_{uuid.uuid4().hex}{ext}"
+    temp_path = os.path.join(UPLOAD_FOLDER, temp_name)
+    with open(temp_path, "wb") as f:
+        f.write(await file.read())
+    task = upload_image_task.apply_async(args=[temp_path, file.filename, status, folderPath])
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.post("/queue/extract-form")
+async def queue_extract_form(data: ExtractFormData):
+    existing = get_image(data.ImageName, collection_name_image_detail)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Image not found. Upload first.")
+    task = extract_form_task.apply_async(args=[
+        data.ImageName,
+        data.ImagePath,
+        data.Size,
+        data.Status,
+        data.CreatedAt,
+        data.FolderPath,
+    ])
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.get("/tasks/{task_id}")
+async def get_task_status(task_id: str):
+    result: AsyncResult = celery_app.AsyncResult(task_id)
+    resp = {"task_id": task_id, "state": result.state}
+    if result.state == "SUCCESS":
+        resp["result"] = result.result
+    elif result.state == "FAILURE":
+        resp["error"] = str(result.result)
+    elif result.info and isinstance(result.info, dict):
+        resp["meta"] = result.info
+    return resp
 
 
 # ✅ This will run FastAPI when executing this file directly

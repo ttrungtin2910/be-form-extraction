@@ -5,9 +5,11 @@ A FastAPI application for extracting information from forms using Google Documen
 ## 🚀 Features
 
 - **Image Upload**: Upload form images to Google Cloud Storage
-- **Data Extraction**: Use Google Document AI to extract information from forms
+- **Queued (Async) Upload & Analysis**: Tách upload và phân tích sang hàng đợi Celery + Redis giúp không chặn FastAPI
+- **Form Data Extraction**: Use Google Document AI + OpenAI model post-processing
 - **Data Storage**: Store metadata and extraction results in Firestore
 - **RESTful API**: Provide endpoints for managing images and form data
+- **Real‑time Polling**: FE poll trạng thái task qua `/tasks/{task_id}`
 
 ## 🛠️ Technologies Used
 
@@ -19,8 +21,10 @@ A FastAPI application for extracting information from forms using Google Documen
 
 ## 📋 System Requirements
 
-- Python 3.8+
-- Google Cloud Platform account
+- Python 3.8+ (đã test với 3.12)
+- Redis (queue backend) – local Docker hoặc managed service
+- Google Cloud Platform account (Firestore + Storage + Document AI)
+- OpenAI API key (model for extraction post-processing)
 - Configured Google Document AI processor
 
 ## 🔧 Installation
@@ -59,6 +63,10 @@ LOCATION=us
 PROCESSOR_ID=your_document_ai_processor_id
 PROCESSOR_VERSION_ID=your_processor_version_id
 GOOGLE_APPLICATION_CREDENTIALS=path/to/your/service-account-key.json
+
+# Queue / Redis
+# Optional: change if not using default localhost
+REDIS_URL=redis://localhost:6379/0
 ```
 
 ### 4. Google Cloud Setup
@@ -70,23 +78,108 @@ GOOGLE_APPLICATION_CREDENTIALS=path/to/your/service-account-key.json
 
 ## 🚀 Running the Application
 
-### Development environment
+### 0. Start Redis
 
 ```bash
-python main.py
+docker run -d --name redis -p 6379:6379 redis:7-alpine
 ```
 
-The application will run at `http://localhost:8000`
-
-### Using uvicorn
+### 1. Start API (development)
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --reload --port 8000
 ```
 
-## 📚 API Endpoints
+### 2. Start Celery worker
 
-### 1. Upload Image
+Python 3.13 có thể gặp lỗi với pool mặc định. Dùng script tự động chọn pool:
+
+```bash
+python scripts/run_worker.py
+```
+
+Ép luôn solo:
+```bash
+# PowerShell
+$env:CELERY_FORCE_SOLO=1
+python scripts/run_worker.py
+```
+
+Dùng lại prefork (khuyến nghị khi ở Python 3.12):
+```bash
+$env:CELERY_FORCE_SOLO=0
+$env:CELERY_POOL=prefork
+python scripts/run_worker.py
+```
+
+### 3. (Optional) Start Flower dashboard
+
+```bash
+celery -A celery_app.celery_app flower --port=5555
+```
+
+Application: `http://localhost:8000`  | Flower: `http://localhost:5555`
+
+> Bạn vẫn có thể dùng các endpoint đồng bộ cũ (`/upload-image/`, `/ExtractForm`), nhưng nên chuyển sang **queue endpoints** để tránh nghẽn khi xử lý nhiều ảnh.
+
+## ⚙️ Async Queue Endpoints
+
+| Purpose | Sync Endpoint | Queue Endpoint | Notes |
+|---------|---------------|----------------|-------|
+| Upload image | `POST /upload-image/` | `POST /queue/upload-image` | Queue trả về `task_id` |
+| Extract form | `POST /ExtractForm` | `POST /queue/extract-form` | Phải có metadata ảnh trước |
+| Task status  | N/A | `GET /tasks/{task_id}` | Poll tới khi `state=SUCCESS` |
+
+### Upload (Queued)
+```bash
+curl -X POST http://localhost:8000/queue/upload-image \
+  -F "file=@sample.jpg" \
+  -F "status=Uploaded" \
+  -F "folderPath=2025/aug"
+```
+Response:
+```json
+{"task_id": "<uuid>", "status": "queued"}
+```
+
+### Extract (Queued)
+```bash
+curl -X POST http://localhost:8000/queue/extract-form \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ImageName": "20250810_101112_123456.jpg",
+    "ImagePath": "https://storage.googleapis.com/display-form-extract/2025/aug/20250810_101112_123456.jpg",
+    "Status": "Uploaded",
+    "CreatedAt": "20250810_101112_123456",
+    "FolderPath": "2025/aug",
+    "Size": 1.25
+  }'
+```
+Response:
+```json
+{"task_id": "<uuid>", "status": "queued"}
+```
+
+### Poll Task
+```bash
+curl http://localhost:8000/tasks/<uuid>
+```
+Possible states: `PENDING`, `STARTED`, `SUCCESS`, `FAILURE`, `RETRY`.
+
+On success:
+```json
+{
+  "task_id": "<uuid>",
+  "state": "SUCCESS",
+  "result": {"image_name": "...", "analysis_result": {"...": "..."}}
+}
+```
+
+Front-end đã được cập nhật để tự động poll khi gọi analyze hoặc bulk analyze, không cần thay đổi thêm.
+
+## 📚 API Endpoints (Summary)
+
+### 1. Upload Image (Sync)
 
 **POST** `/upload-image/`
 
@@ -99,7 +192,7 @@ curl -X POST "http://localhost:8000/upload-image/" \
   -F "status=pending"
 ```
 
-### 2. Extract Form
+### 2. Extract Form (Sync)
 
 **POST** `/ExtractForm`
 
@@ -131,6 +224,9 @@ curl -X POST "http://localhost:8000/GetFormExtractInformation" \
 
 ### 4. Image Management
 
+### 5. Queue Variants (Async)
+See "Async Queue Endpoints" section above.
+
 - **GET** `/images/` - Get all images list
 - **GET** `/images/{image_name}` - Get specific image information
 - **POST** `/images/` - Create or update image information
@@ -155,7 +251,9 @@ be-form-extraction/
 │   ├── document_ai_helpers.py  # Document AI helpers
 │   └── file_processing.py  # File processing utilities
 ├── temp_uploads/           # Temporary file storage
-├── main.py                 # FastAPI application
+├── main.py                 # FastAPI application & queue endpoints
+├── celery_app.py           # Celery factory (Redis broker/backend)
+├── tasks.py                # Celery tasks (upload + extract)
 ├── requirements.txt        # Python dependencies
 └── README.md              # This file
 ```

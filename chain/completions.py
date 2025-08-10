@@ -56,6 +56,14 @@ class TicketChatBot:
         content = response.content if isinstance(response.content, str) else str(response.content)
         return self.post_processing(content)
 
+    def analyze_ticket_sync(self, image_path: str, ocr_text: str) -> dict:
+        # New synchronous helper for Celery tasks
+        image_base64 = self.encode_image_base64(image_path)
+        messages = self.build_messages(ocr_text, image_base64)
+        response = self.llm.invoke(messages)
+        content = response.content if isinstance(response.content, str) else str(response.content)
+        return self.post_processing(content)
+
     def post_processing(self, content: str) -> dict:
         try:
             return json.loads(content)
