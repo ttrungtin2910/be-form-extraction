@@ -4,28 +4,12 @@ A FastAPI application for extracting information from forms using Google Documen
 
 ## 🚀 Features
 
-- **Image Upload**: Upload form images to Google Cloud Storage
-- **Queued (Async) Upload & Analysis**: Tách upload và phân tích sang hàng đợi Celery + Redis giúp không chặn FastAPI
-- **Form Data Extraction**: Use Google Document AI + OpenAI model post-processing
-- **Data Storage**: Store metadata and extraction results in Firestore
-- **RESTful API**: Provide endpoints for managing images and form data
-- **Real‑time Polling**: FE poll trạng thái task qua `/tasks/{task_id}`
 
 ## 🛠️ Technologies Used
 
-- **FastAPI**: Modern web framework for Python
-- **Google Document AI**: Document information extraction
-- **Google Cloud Firestore**: NoSQL database
-- **Google Cloud Storage**: File storage
-- **OpenAI**: Natural language processing (if needed)
 
 ## 📋 System Requirements
 
-- Python 3.8+ (đã test với 3.12)
-- Redis (queue backend) – local Docker hoặc managed service
-- Google Cloud Platform account (Firestore + Storage + Document AI)
-- OpenAI API key (model for extraction post-processing)
-- Configured Google Document AI processor
 
 ## 🔧 Installation
 
@@ -267,10 +251,6 @@ curl -X POST "http://localhost:8000/GetFormExtractInformation" \
 ### 5. Queue Variants (Async)
 See "Async Queue Endpoints" section above.
 
-- **GET** `/images/` - Get all images list
-- **GET** `/images/{image_name}` - Get specific image information
-- **POST** `/images/` - Create or update image information
-- **DELETE** `/images/{image_name}` - Delete image
 
 ## 📁 Project Structure
 
@@ -300,9 +280,6 @@ be-form-extraction/
 
 ## 🔒 Security
 
-- **Credentials**: Do not commit Google Cloud credentials files to repository
-- **Environment variables**: Use `.env` file to store sensitive information
-- **CORS**: Configure CORS appropriately for production
 
 ## 🧪 Testing
 
@@ -364,10 +341,88 @@ This project is distributed under the MIT License. See the `LICENSE` file for mo
 
 If you encounter any issues or have questions, please create an issue in the repository or contact the development team.
 
-## 🔄 Changelog
+## � Redis Monitoring (RedisInsight)
+
+Bạn có thể dùng RedisInsight để quan sát queue Celery (keys, performance) song song với Flower.
+
+### Cách 1: Docker nhanh (khuyến nghị)
+
+```powershell
+docker run -d --name redisinsight -p 5540:5540 redis/redisinsight:latest
+```
+
+Mở: http://localhost:5540
+
+Add database:
+```
+Host: host.docker.internal   (hoặc 127.0.0.1 nếu Docker Desktop cho phép)
+Port: 6379
+Password: (để trống nếu Redis chưa đặt mật khẩu)
+```
+
+Persist dữ liệu (giữ cấu hình sau khi xoá container):
+```powershell
+docker run -d --name redisinsight -p 5540:5540 -v redisinsight-data:/data redis/redisinsight:latest
+```
+
+### Cách 2: Docker Compose (Redis + RedisInsight)
+
+Tạo `docker-compose.yml` (nếu chưa có):
+```yaml
+version: '3.8'
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+  redisinsight:
+    image: redis/redisinsight:latest
+    ports:
+      - "5540:5540"
+    depends_on:
+      - redis
+    volumes:
+      - redisinsight-data:/data
+volumes:
+  redisinsight-data:
+```
+
+Chạy:
+```powershell
+docker compose up -d
+```
+
+### Cách 3: Cài native app
+Tải bản Windows từ: https://redis.io/insight/ → Install → Add database như trên.
+
+### Xem dữ liệu Celery
+  - `celery-task-meta-<task_id>`: trạng thái & kết quả task
+  - `unacked`, `celery`, v.v. (tùy broker config)
+
+### So sánh nhanh
+| Tool | Mục đích chính | Ưu điểm | Nhược |
+|------|----------------|---------|-------|
+| Flower | Giám sát task (state, runtime) | UI chuyên cho Celery | Không xem raw key | 
+| RedisInsight | Quan sát Redis cấp thấp | Xem key, TTL, perf, search | Không chuyên biệt Celery |
+
+Kết hợp cả hai giúp vừa thấy tiến trình task (Flower) vừa xem nội dung lưu trong Redis (RedisInsight).
+
+### Dọn dẹp
+```powershell
+docker rm -f redisinsight
+docker volume rm redisinsight-data   # nếu muốn xoá luôn dữ liệu
+```
+
+### Troubleshooting
+| Vấn đề | Cách xử lý |
+|--------|------------|
+| Không connect được bằng 127.0.0.1 | Dùng `host.docker.internal` |
+| Không thấy key celery-task-meta-* | Task chưa chạy xong hoặc dùng DB index khác |
+| Chỉ 1 task chạy một lúc | Kiểm tra pool (solo) & biến `CELERY_CONCURRENCY` |
+| Timeout khi connect | Đảm bảo container Redis đang chạy (docker ps) |
+
+Muốn bảo mật production: bật password trong Redis (requirepass) rồi cấu hình trong REDIS_URL (`redis://:password@host:6379/0`).
+
+## �🔄 Changelog
 
 ### Version 1.0.0
-- Initial release
-- Basic form extraction functionality
-- Google Cloud integration
-- FastAPI REST API 
