@@ -1,6 +1,10 @@
 import os
 import sys
 from celery import Celery
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 def make_celery() -> Celery:
@@ -42,4 +46,6 @@ def make_celery() -> Celery:
 celery_app = make_celery()
 
 if celery_app.conf.get("worker_pool") == "solo":
-    print(f"[Celery] Using SOLO pool (Python {sys.version_info.major}.{sys.version_info.minor}). Set CELERY_FORCE_SOLO=0 and use Python 3.12 for prefork.")
+    print(
+        f"[Celery] Using SOLO pool (Python {sys.version_info.major}.{sys.version_info.minor}). Set CELERY_FORCE_SOLO=0 and use Python 3.12 for prefork."
+    )

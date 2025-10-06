@@ -6,7 +6,7 @@ load_dotenv()
 
 class Configuration:
     """Configuration class for managing environment variables and application settings."""
-    
+
     # OpenAI Configuration
     OPENAI_KEY = os.getenv("OPENAI_KEY")
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
@@ -18,16 +18,20 @@ class Configuration:
     PROCESSOR_ID = os.getenv("PROCESSOR_ID")
     PROCESSOR_VERSION_ID = os.getenv("PROCESSOR_VERSION_ID")
     GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    FIRESTORE_DATABASE = os.getenv("FIRESTORE_DATABASE", "imageinformation")
 
     # Application Configuration
     BUCKET_NAME = os.getenv("BUCKET_NAME", "display-form-extract")
     UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "temp_uploads")
-    
+
     # Security Configuration
-    ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,https://localhost:3000").split(",")
+    ALLOWED_ORIGINS = os.getenv(
+        "ALLOWED_ORIGINS", "http://localhost:3000,https://localhost:3000"
+    ).split(",")
     MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "10485760"))  # 10MB default
     ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-    
+    API_SECRET_KEY = os.getenv("API_SECRET_KEY")
+
     # Redis/Celery Configuration
     REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     CELERY_TIMEZONE = os.getenv("CELERY_TIMEZONE", "UTC")
@@ -47,10 +51,22 @@ class Configuration:
             ("PROCESSOR_VERSION_ID", cls.PROCESSOR_VERSION_ID),
             ("GOOGLE_APPLICATION_CREDENTIALS", cls.GOOGLE_APPLICATION_CREDENTIALS),
         ]
-        
-        missing_vars = [var_name for var_name, var_value in required_vars if not var_value]
-        
+
+        missing_vars = [
+            var_name for var_name, var_value in required_vars if not var_value
+        ]
+
         if missing_vars:
-            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
-        
+            raise ValueError(
+                f"Missing required environment variables: {', '.join(missing_vars)}"
+            )
+
+        # Validate credentials file exists
+        if cls.GOOGLE_APPLICATION_CREDENTIALS and not os.path.exists(
+            cls.GOOGLE_APPLICATION_CREDENTIALS
+        ):
+            raise ValueError(
+                f"Credentials file not found: {cls.GOOGLE_APPLICATION_CREDENTIALS}"
+            )
+
         return True

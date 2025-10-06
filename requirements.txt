@@ -14,5 +14,6 @@ python-multipart>=0.0.9
 python-dotenv>=1.0.0
 celery>=5.4.0
 redis>=5.0.0
+slowapi>=0.1.9
 # python-magic>=0.4.27  # Optional: requires libmagic system library
 requests>=2.31.0

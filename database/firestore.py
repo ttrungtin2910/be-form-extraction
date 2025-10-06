@@ -3,15 +3,18 @@ from datetime import datetime
 from typing import Optional, List
 
 from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 from pydantic import BaseModel
-
-# Set path to Google Cloud service account key
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = (
-    "database/crafty-isotope-456021-k2-b28647db6db6.json"
-)
+from properties.config import Configuration
 
 # Initialize Firestore client
-db = firestore.Client(database="imageinformation")
+# Credentials should be set via GOOGLE_APPLICATION_CREDENTIALS environment variable
+# If FIRESTORE_DATABASE is not set, Firestore will use the default database
+if Configuration.FIRESTORE_DATABASE:
+    db = firestore.Client(database=Configuration.FIRESTORE_DATABASE)
+else:
+    # Use default database (no database parameter)
+    db = firestore.Client()
 
 
 class ImageData(BaseModel):
@@ -79,15 +82,39 @@ def delete_image(image_name: str, collection_name: str):
     db.collection(collection_name).document(image_name).delete()
 
 
-def list_images(collection_name: str) -> List[dict]:
+def list_images(
+    collection_name: str,
+    folder_path: Optional[str] = None,
+    page: int = 1,
+    limit: int = 20,
+) -> tuple[List[dict], int]:
     """
-    Retrieve all image documents from the Firestore collection.
+    Retrieve image documents from the Firestore collection with optional filtering and pagination.
+
+    Args:
+        collection_name: Name of the Firestore collection
+        folder_path: Optional folder path to filter by
+        page: Page number (1-indexed)
+        limit: Number of items per page
 
     Returns:
-        List[dict]: A list of image metadata dictionaries.
+        tuple[List[dict], int]: A tuple of (list of image metadata, total count)
     """
-    docs = db.collection(collection_name).stream()
-    return [doc.to_dict() for doc in docs]
+    query = db.collection(collection_name)
+
+    # Filter by folder path if provided
+    if folder_path is not None:
+        query = query.where(filter=FieldFilter("FolderPath", "==", folder_path))
+
+    # Get total count (before pagination)
+    all_docs = list(query.stream())
+    total = len(all_docs)
+
+    # Apply pagination
+    offset = (page - 1) * limit
+    paginated_docs = all_docs[offset : offset + limit]
+
+    return [doc.to_dict() for doc in paginated_docs], total
 
 
 # Model and helpers for folder documents
