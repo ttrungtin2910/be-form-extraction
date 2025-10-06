@@ -17,3 +17,5 @@ redis>=5.0.0
 slowapi>=0.1.9
 # python-magic>=0.4.27  # Optional: requires libmagic system library
 requests>=2.31.0
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3.0

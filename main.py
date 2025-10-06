@@ -4,7 +4,16 @@ import uuid
 from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Request
+from fastapi import (
+    FastAPI,
+    UploadFile,
+    File,
+    HTTPException,
+    Form,
+    Depends,
+    Request,
+    status,
+)
 from fastapi.responses import JSONResponse
 from middleware.auth import verify_api_key
 from middleware.rate_limiter import (
@@ -28,6 +37,15 @@ from properties.config import Configuration
 from utils.file_validation import validate_upload_file, FileValidationError
 from utils.path_sanitizer import sanitize_folder_path
 from services.form_extraction_service import FormExtractionService
+from services.auth_service import (
+    authenticate_user,
+    create_access_token,
+    update_last_login,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+)
+from models.user import UserLogin, Token, User
+from middleware.user_auth import get_current_active_user, get_current_admin_user
+from datetime import timedelta
 
 from database.firestore import (
     db,
@@ -119,6 +137,74 @@ app.add_middleware(
 
 # Create upload directory
 os.makedirs(config.UPLOAD_FOLDER, exist_ok=True)
+
+
+# ============================================
+# Authentication Endpoints
+# ============================================
+
+
+@app.post("/auth/login", response_model=Token)
+@limiter.limit(RATE_LIMIT_GENERAL)
+async def login(request: Request, user_login: UserLogin):
+    """
+    User login endpoint
+
+    Returns JWT access token on successful authentication
+    """
+    logger.info(f"Login attempt for user: {user_login.username}")
+
+    user = authenticate_user(user_login.username, user_login.password)
+    if not user:
+        logger.warning(f"Failed login attempt for user: {user_login.username}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Update last login time
+    update_last_login(user.username)
+
+    # Create access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+
+    logger.info(f"User {user.username} logged in successfully")
+
+    return Token(
+        access_token=access_token,
+        token_type="bearer",
+        username=user.username,
+        full_name=user.full_name,
+        role=user.role,
+    )
+
+
+@app.get("/auth/me", response_model=User)
+async def get_current_user_info(current_user: User = Depends(get_current_active_user)):
+    """
+    Get current user information
+
+    Requires valid JWT token
+    """
+    return current_user
+
+
+@app.post("/auth/logout")
+async def logout(current_user: User = Depends(get_current_active_user)):
+    """
+    Logout endpoint (client should discard token)
+    """
+    logger.info(f"User {current_user.username} logged out")
+    return {"success": True, "message": "Logged out successfully"}
+
+
+# ============================================
+# Image Management Endpoints
+# ============================================
 
 
 @app.post("/upload-image/")
