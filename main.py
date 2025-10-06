@@ -15,7 +15,8 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
-from middleware.auth import verify_api_key
+
+# from middleware.auth import verify_api_key  # No longer needed - using user authentication
 from middleware.rate_limiter import (
     limiter,
     RATE_LIMIT_UPLOAD,
@@ -44,8 +45,11 @@ from services.auth_service import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
 )
 from models.user import UserLogin, Token, User
+from models.activity_log import ActivityLogResponse
 from middleware.user_auth import get_current_active_user, get_current_admin_user
+from middleware.activity_logger import ActivityLoggingMiddleware
 from datetime import timedelta
+from typing import Optional
 
 from database.firestore import (
     db,
@@ -83,6 +87,9 @@ app = FastAPI(title="Firestore Image Metadata API")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 app.add_middleware(SlowAPIMiddleware)
+
+# Add activity logging middleware
+app.add_middleware(ActivityLoggingMiddleware)
 
 # Add global exception handlers for standardized error responses
 app.add_exception_handler(HTTPException, http_exception_handler)
@@ -214,7 +221,7 @@ async def upload_image(
     status: str = Form(...),
     folderPath: str = Form(""),
     file: UploadFile = File(...),
-    _: str = Depends(verify_api_key),
+    current_user: User = Depends(get_current_active_user),
 ):
     logger.info("Received request to upload image")
     logger.info(f"Status: {status}")
@@ -309,7 +316,9 @@ async def upload_image(
 
 
 @app.post("/images/", response_model=dict)
-async def create_or_update_image(data: ImageData, _: str = Depends(verify_api_key)):
+async def create_or_update_image(
+    data: ImageData, current_user: User = Depends(get_current_active_user)
+):
     """
     Create or update an image record in Firestore.
     """
@@ -329,7 +338,9 @@ async def read_image(image_name: str):
 
 
 @app.delete("/images/{image_name}", response_model=dict)
-async def remove_image(image_name: str, _: str = Depends(verify_api_key)):
+async def remove_image(
+    image_name: str, current_user: User = Depends(get_current_active_user)
+):
     """
     Delete an image record from Firestore.
     """
@@ -368,7 +379,9 @@ async def list_folders():
 
 # Create folder
 @app.post("/folders/")
-async def create_folder(payload: FolderCreateData, _: str = Depends(verify_api_key)):
+async def create_folder(
+    payload: FolderCreateData, current_user: User = Depends(get_current_active_user)
+):
     folder_path = payload.folderPath.strip()
     if not folder_path:
         raise HTTPException(status_code=400, detail="folderPath is required")
@@ -384,7 +397,9 @@ async def create_folder(payload: FolderCreateData, _: str = Depends(verify_api_k
 
 # Delete folder
 @app.delete("/folders/{folder_path:path}")
-async def delete_folder(folder_path: str, _: str = Depends(verify_api_key)):
+async def delete_folder(
+    folder_path: str, current_user: User = Depends(get_current_active_user)
+):
     # Sanitize folder path
     safe_folder_path = sanitize_folder_path(folder_path)
 
@@ -396,7 +411,9 @@ async def delete_folder(folder_path: str, _: str = Depends(verify_api_key)):
 
 # Rename folder
 @app.post("/folders/rename")
-async def rename_folder(payload: FolderRenameData, _: str = Depends(verify_api_key)):
+async def rename_folder(
+    payload: FolderRenameData, current_user: User = Depends(get_current_active_user)
+):
     old_path = payload.oldPath.strip()
     new_path = payload.newPath.strip()
     if not old_path or not new_path:
@@ -418,7 +435,9 @@ async def rename_folder(payload: FolderRenameData, _: str = Depends(verify_api_k
 @app.post("/ExtractForm")
 @limiter.limit(RATE_LIMIT_AI)
 async def extract_form(
-    request: Request, data: ExtractFormData, _: str = Depends(verify_api_key)
+    request: Request,
+    data: ExtractFormData,
+    current_user: User = Depends(get_current_active_user),
 ):
     """Extract form data from image using AI analysis."""
     logger.info(f"Received request to analyze image: {data.ImageName}")
@@ -483,7 +502,7 @@ async def queue_upload_image(
     status: str = Form(...),
     folderPath: str = Form(""),
     file: UploadFile = File(...),
-    _: str = Depends(verify_api_key),
+    current_user: User = Depends(get_current_active_user),
 ):
     # Sanitize folder path
     safe_folder_path = sanitize_folder_path(folderPath) if folderPath else ""
@@ -505,7 +524,9 @@ async def queue_upload_image(
 @app.post("/queue/extract-form")
 @limiter.limit(RATE_LIMIT_AI)
 async def queue_extract_form(
-    request: Request, data: ExtractFormData, _: str = Depends(verify_api_key)
+    request: Request,
+    data: ExtractFormData,
+    current_user: User = Depends(get_current_active_user),
 ):
     existing = get_image(data.ImageName, config.COLLECTION_NAME_IMAGE_DETAIL)
     if not existing:
@@ -606,6 +627,188 @@ async def readiness_check():
 
     status_code = 200 if health_status["success"] else 503
     return JSONResponse(content=health_status, status_code=status_code)
+
+
+# ==================== DEBUG ENDPOINTS ====================
+
+
+@app.get("/debug/token")
+@limiter.limit(RATE_LIMIT_GENERAL)
+async def debug_token(
+    request: Request, current_user: User = Depends(get_current_active_user)
+):
+    """Debug endpoint to check token and user info"""
+    return {
+        "user_id": current_user.user_id,
+        "username": current_user.username,
+        "role": current_user.role,
+        "headers": dict(request.headers),
+        "auth_header": request.headers.get("Authorization"),
+    }
+
+
+# ==================== ACTIVITY LOGGING ENDPOINTS ====================
+
+
+@app.get("/activity-logs", response_model=ActivityLogResponse)
+@limiter.limit(RATE_LIMIT_GENERAL)
+async def get_activity_logs(
+    request: Request,
+    user_id: Optional[str] = None,
+    username: Optional[str] = None,
+    activity_type: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    page: int = 1,
+    limit: int = 50,
+    current_user: User = Depends(get_current_admin_user),
+):
+    """Get activity logs with filtering and pagination (Admin only)"""
+    try:
+        from models.activity_log import ActivityLogFilter, ActivityType
+        from services.datastore_activity_service import datastore_activity_service
+
+        # Convert activity_type string to enum if provided
+        activity_type_enum = None
+        if activity_type:
+            try:
+                activity_type_enum = ActivityType(activity_type)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid activity_type: {activity_type}",
+                )
+
+        # Create filter
+        filters = ActivityLogFilter(
+            user_id=user_id,
+            username=username,
+            activity_type=activity_type_enum,
+            start_date=start_date,
+            end_date=end_date,
+            page=page,
+            limit=min(limit, 1000),  # Cap at 1000
+        )
+
+        # Get logs
+        result = await datastore_activity_service.get_logs(filters)
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to get activity logs: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve activity logs",
+        )
+
+
+@app.get("/activity-logs/my-activity")
+@limiter.limit(RATE_LIMIT_GENERAL)
+async def get_my_activity_logs(
+    request: Request,
+    page: int = 1,
+    limit: int = 50,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Get current user's activity logs"""
+    try:
+        from models.activity_log import ActivityLogFilter
+        from services.datastore_activity_service import datastore_activity_service
+
+        # Create filter for current user only
+        filters = ActivityLogFilter(
+            user_id=current_user.user_id,
+            page=page,
+            limit=min(limit, 100),  # Cap at 100 for user's own logs
+        )
+
+        # Get logs
+        result = await datastore_activity_service.get_logs(filters)
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to get user activity logs: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve your activity logs",
+        )
+
+
+@app.get("/activity-logs/summary")
+@limiter.limit(RATE_LIMIT_GENERAL)
+async def get_activity_summary(
+    request: Request,
+    user_id: Optional[str] = None,
+    days: int = 7,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Get activity summary for a user (Admin can view any user, users can only view themselves)"""
+    try:
+        from services.datastore_activity_service import datastore_activity_service
+
+        # Determine which user to get summary for
+        target_user_id = (
+            user_id if current_user.role == "admin" else current_user.user_id
+        )
+
+        # Validate days parameter
+        if days < 1 or days > 365:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Days must be between 1 and 365",
+            )
+
+        # Get summary
+        summary = await datastore_activity_service.get_user_activity_summary(
+            target_user_id, days
+        )
+
+        return summary
+
+    except Exception as e:
+        logger.error(f"Failed to get activity summary: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve activity summary",
+        )
+
+
+@app.post("/activity-logs/cleanup")
+@limiter.limit(RATE_LIMIT_GENERAL)
+async def cleanup_old_activity_logs(
+    request: Request,
+    days_to_keep: int = 90,
+    current_user: User = Depends(get_current_admin_user),
+):
+    """Clean up old activity logs (Admin only)"""
+    try:
+        from services.datastore_activity_service import datastore_activity_service
+
+        # Validate days parameter
+        if days_to_keep < 30:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Days to keep must be at least 30",
+            )
+
+        # Cleanup logs
+        deleted_count = await datastore_activity_service.cleanup_old_logs(days_to_keep)
+
+        return {
+            "success": True,
+            "message": f"Cleaned up {deleted_count} old activity logs",
+            "deleted_count": deleted_count,
+            "days_kept": days_to_keep,
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to cleanup activity logs: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to cleanup activity logs",
+        )
 
 
 # ✅ This will run FastAPI when executing this file directly

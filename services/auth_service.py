@@ -9,6 +9,9 @@ from jose import JWTError, jwt
 from fastapi import HTTPException, status
 from models.user import UserInDB, TokenData
 from properties.config import Configuration
+import logging
+
+logger = logging.getLogger(__name__)
 
 # JWT settings
 SECRET_KEY = Configuration.API_SECRET_KEY or "your-secret-key-for-jwt"
@@ -146,6 +149,28 @@ def get_current_user(token: str) -> UserInDB:
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user
+
+
+def get_current_user_from_token(token: str) -> dict:
+    """Get user info from JWT token (for middleware use)"""
+    try:
+        logger.info(f"Verifying token: {token[:20]}...")
+        token_data = verify_token(token)
+        logger.info(f"Token data: {token_data}")
+        user = get_user(username=token_data.username)
+        if user is None:
+            logger.warning(f"User not found: {token_data.username}")
+            return None
+        result = {
+            "user_id": user.username,
+            "username": user.username,
+            "role": user.role,
+        }
+        logger.info(f"User info: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Error in get_current_user_from_token: {str(e)}")
+        return None
 
 
 def update_last_login(username: str):
