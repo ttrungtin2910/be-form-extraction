@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 # Set path to Google Cloud service account key
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = (
-    "database/crafty-isotope-456021-k2-a99ca9ffcde0.json"
+    "database/crafty-isotope-456021-k2-b28647db6db6.json"
 )
 
 # Initialize Firestore client

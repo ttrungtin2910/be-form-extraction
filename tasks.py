@@ -1,6 +1,6 @@
-import asyncio
 import os
 import time
+import logging
 from typing import Dict, Any
 
 from celery import states
@@ -9,19 +9,19 @@ from celery_app import celery_app
 
 from database.firestore import ImageData, upsert_image, get_image
 from database.ggc_storage import upload_image_to_gcs
-from utils.file_processing import download_image_from_url
+from utils.file_processing import download_image_from_url_sync
 from chain.completions import TicketChatBot
 from properties.config import Configuration
 
-# Constants / configuration
-BUCKET_NAME = "display-form-extract"
-collection_name_image_detail = "imagedetail"
-collection_name_form_extract = "forminformation"
-UPLOAD_FOLDER = "temp_uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# Configure logger
+logger = logging.getLogger(__name__)
 
+# Initialize configuration
 _config = Configuration()
 _bot = TicketChatBot(_config)
+
+# Create upload directory
+os.makedirs(_config.UPLOAD_FOLDER, exist_ok=True)
 
 
 def _timestamp_name(ext: str) -> str:
@@ -45,12 +45,12 @@ def upload_image_task(self, temp_local_path: str, original_filename: str, status
         destination_blob_name = f"{folder_path}/{image_name}" if folder_path else image_name
 
         upload_image_to_gcs(
-            bucket_name=BUCKET_NAME,
+            bucket_name=_config.BUCKET_NAME,
             source_file_path=temp_local_path,
             destination_blob_name=destination_blob_name,
         )
 
-        gcs_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{destination_blob_name}"
+        gcs_url = f"https://storage.googleapis.com/{_config.BUCKET_NAME}/{destination_blob_name}"
         file_size_mb = round(os.path.getsize(temp_local_path) / (1024 * 1024), 2)
         meta = ImageData(
             Status=status,
@@ -60,7 +60,7 @@ def upload_image_task(self, temp_local_path: str, original_filename: str, status
             FolderPath=folder_path,
             Size=file_size_mb,
         )
-        upsert_image(meta, collection_name_image_detail, meta.ImageName)
+        upsert_image(meta, _config.COLLECTION_NAME_IMAGE_DETAIL, meta.ImageName)
         try:
             os.remove(temp_local_path)
         except OSError:
@@ -81,11 +81,13 @@ def extract_form_task(
     folder_path: str,
 ) -> Dict[str, Any]:
     """Perform form extraction (OpenAI + Firestore updates)."""
-    local_path = os.path.join(UPLOAD_FOLDER, image_name)
+    local_path = os.path.join(_config.UPLOAD_FOLDER, image_name)
     try:
+        logger.info(f"Starting form extraction for {image_name}")
+        
         # Mark image status as Processing immediately (avoid duplicate clicks client-side)
         try:
-            existing = get_image(image_name, collection_name_image_detail) or {}
+            existing = get_image(image_name, _config.COLLECTION_NAME_IMAGE_DETAIL) or {}
             processing_meta = ImageData(
                 Status="Processing",
                 ImageName=image_name,
@@ -94,22 +96,28 @@ def extract_form_task(
                 FolderPath=folder_path or existing.get("FolderPath", ""),
                 Size=size or existing.get("Size", 0.0),
             )
-            upsert_image(processing_meta, collection_name_image_detail, image_name)
-        except Exception:
+            upsert_image(processing_meta, _config.COLLECTION_NAME_IMAGE_DETAIL, image_name)
+            logger.info(f"Marked {image_name} as Processing")
+        except Exception as e:
             # Non-fatal – continue extraction even if we cannot pre-mark
-            pass
-        # Download image
-        asyncio.run(download_image_from_url(image_url, local_path))
+            logger.warning(f"Could not mark image as Processing: {e}")
+        
+        # Download image using synchronous method (avoid asyncio.run conflicts)
+        logger.info(f"Downloading image from {image_url}")
+        download_image_from_url_sync(image_url, local_path)
+        logger.info(f"Download completed for {image_name}")
 
         # Analyze (synchronous wrapper)
+        logger.info(f"Starting AI analysis for {image_name}")
         result = _bot.analyze_ticket_sync(local_path, "")
         if not isinstance(result, dict):
             result = {"raw": str(result)}
+        logger.info(f"AI analysis completed for {image_name}")
 
         # Determine size fallback (reuse previously fetched existing if available)
         if not size:
             if 'existing' not in locals():
-                existing = get_image(image_name, collection_name_image_detail) or {}
+                existing = get_image(image_name, _config.COLLECTION_NAME_IMAGE_DETAIL) or {}
             size = existing.get("Size", 0.0)
 
         # Save extraction result to forminformation collection
@@ -122,7 +130,8 @@ def extract_form_task(
             "Size": size,
             "analysis_result": result,
         }
-        upsert_image(form_doc, collection_name_form_extract, image_name)
+        upsert_image(form_doc, _config.COLLECTION_NAME_FORM_EXTRACT, image_name)
+        logger.info(f"Saved form extraction result for {image_name}")
 
         # Update status in imagedetail
         meta = ImageData(
@@ -133,12 +142,24 @@ def extract_form_task(
             FolderPath=folder_path,
             Size=size,
         )
-        upsert_image(meta, collection_name_image_detail, image_name)
+        upsert_image(meta, _config.COLLECTION_NAME_IMAGE_DETAIL, image_name)
+        logger.info(f"Updated image status to Completed for {image_name}")
 
+        # Clean up temporary file
         try:
             os.remove(local_path)
+            logger.info(f"Cleaned up temporary file: {local_path}")
+        except OSError as e:
+            logger.warning(f"Could not remove temporary file {local_path}: {e}")
+        
+        logger.info(f"Form extraction completed successfully for {image_name}")
+        return {"image_name": image_name, "analysis_result": result}
+    except Exception as e:
+        logger.error(f"Form extraction failed for {image_name}: {str(e)}")
+        # Clean up temporary file on error
+        try:
+            if os.path.exists(local_path):
+                os.remove(local_path)
         except OSError:
             pass
-        return {"image_name": image_name, "analysis_result": result}
-    except Exception as e:  # pragma: no cover
         raise
