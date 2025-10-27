@@ -104,11 +104,39 @@ def list_images(
 
     # Filter by folder path if provided
     if folder_path is not None:
-        # For root images (folder_path = ""), get images with no FolderPath
+        # For root images (folder_path = ""), get images with no FolderPath or empty FolderPath
         if folder_path == "":
-            # Query for documents where FolderPath is empty string or doesn't exist
-            # In Firestore, we need to query for empty string specifically
-            query = query.where(filter=FieldFilter("FolderPath", "==", ""))
+            # Query for documents where FolderPath is empty or doesn't exist
+            # We need to query ALL images first, then filter in memory
+            # because Firestore can't query for null or multiple values easily
+            all_docs_for_count = list(query.stream())
+
+            # DEBUG: Log all images to see their FolderPath values
+            print(f"[Firestore DEBUG] All documents count: {len(all_docs_for_count)}")
+            for doc in all_docs_for_count[:5]:  # Log first 5
+                doc_data = doc.to_dict()
+                print(
+                    f"[Firestore DEBUG] Image: {doc_data.get('ImageName')}, FolderPath: '{doc_data.get('FolderPath')}'"
+                )
+
+            # Filter in memory for root images - only images with empty FolderPath or None
+            root_docs = [
+                doc
+                for doc in all_docs_for_count
+                if (
+                    doc.to_dict().get("FolderPath") is None
+                    or doc.to_dict().get("FolderPath") == ""
+                    or doc.to_dict().get("FolderPath", "").strip() == ""
+                )
+            ]
+
+            print(f"[Firestore DEBUG] Root images count: {len(root_docs)}")
+
+            total = len(root_docs)
+            # Apply pagination
+            offset = (page - 1) * limit
+            paginated_docs = root_docs[offset : offset + limit]
+            return [doc.to_dict() for doc in paginated_docs], total
         else:
             query = query.where(filter=FieldFilter("FolderPath", "==", folder_path))
 
