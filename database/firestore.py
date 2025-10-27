@@ -28,6 +28,7 @@ class ImageData(BaseModel):
     CreatedAt: str
     FolderPath: str = ""
     Size: float = 0.0
+    UploadBy: str = ""  # Username who uploaded the image
 
 
 def upsert_image(data, collection_name: str, key_upload: str):

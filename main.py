@@ -293,6 +293,7 @@ async def upload_image(
             CreatedAt=str_now,
             FolderPath=safe_folder_path,
             Size=size_val,
+            UploadBy=current_user.username,
         )
 
         # Save metadata to Firestore
@@ -521,9 +522,18 @@ async def queue_upload_image(
     temp_path = os.path.join(config.UPLOAD_FOLDER, temp_name)
     with open(temp_path, "wb") as f:
         f.write(await file.read())
-    task = upload_image_task.apply_async(
-        args=[temp_path, file.filename, status, safe_folder_path]
+
+    # Debug: Log username being passed to task
+    username = current_user.username
+    logger.info(f"[queue_upload_image] Passing username to task: '{username}'")
+    logger.info(
+        f"[queue_upload_image] All args: temp_path, {file.filename}, {status}, {safe_folder_path}, '{username}'"
     )
+
+    task = upload_image_task.apply_async(
+        args=[temp_path, file.filename, status, safe_folder_path, username]
+    )
+    logger.info(f"[queue_upload_image] Task created with ID: {task.id}")
     return {"task_id": task.id, "status": "queued"}
 
 
@@ -549,6 +559,7 @@ async def queue_extract_form(
             CreatedAt=data.CreatedAt or existing.get("CreatedAt", ""),
             FolderPath=data.FolderPath or existing.get("FolderPath", ""),
             Size=data.Size or existing.get("Size", 0.0),
+            UploadBy=existing.get("UploadBy", ""),
         )
         upsert_image(
             processing_meta, config.COLLECTION_NAME_IMAGE_DETAIL, data.ImageName
