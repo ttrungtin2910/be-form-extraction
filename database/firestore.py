@@ -93,7 +93,7 @@ def list_images(
 
     Args:
         collection_name: Name of the Firestore collection
-        folder_path: Optional folder path to filter by
+        folder_path: Optional folder path to filter by. Use empty string "" or None for root images.
         page: Page number (1-indexed)
         limit: Number of items per page
 
@@ -104,7 +104,13 @@ def list_images(
 
     # Filter by folder path if provided
     if folder_path is not None:
-        query = query.where(filter=FieldFilter("FolderPath", "==", folder_path))
+        # For root images (folder_path = ""), get images with no FolderPath
+        if folder_path == "":
+            # Query for documents where FolderPath is empty string or doesn't exist
+            # In Firestore, we need to query for empty string specifically
+            query = query.where(filter=FieldFilter("FolderPath", "==", ""))
+        else:
+            query = query.where(filter=FieldFilter("FolderPath", "==", folder_path))
 
     # Get total count (before pagination)
     all_docs = list(query.stream())
@@ -156,8 +162,8 @@ def delete_folder(path: str):
     # Delete subfolder docs
     subfolder_docs = (
         db.collection(FOLDER_COLLECTION)
-        .where("FolderPath", ">=", path + "/")
-        .where("FolderPath", "<=", path + "/\uf8ff")
+        .where(filter=FieldFilter("FolderPath", ">=", path + "/"))
+        .where(filter=FieldFilter("FolderPath", "<=", path + "/\uf8ff"))
         .stream()
     )
     batch_sub = db.batch()
@@ -171,8 +177,8 @@ def delete_folder(path: str):
     for col in collections_to_clean:
         imgs = (
             db.collection(col)
-            .where("FolderPath", ">=", path)
-            .where("FolderPath", "<=", path + "\uf8ff")
+            .where(filter=FieldFilter("FolderPath", ">=", path))
+            .where(filter=FieldFilter("FolderPath", "<=", path + "\uf8ff"))
             .stream()
         )
         batch = db.batch()
