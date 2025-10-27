@@ -138,7 +138,13 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=config.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "PUT"],
+    allow_methods=[
+        "GET",
+        "POST",
+        "DELETE",
+        "PUT",
+        "OPTIONS",
+    ],  # ✅ Added OPTIONS for preflight
     allow_headers=["Content-Type", "Authorization", "Accept", "Origin"],
 )
 
