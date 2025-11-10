@@ -23,6 +23,8 @@ class Configuration:
     # Application Configuration
     BUCKET_NAME = os.getenv("BUCKET_NAME", "display-form-extract")
     UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "temp_uploads")
+    DASHBOARD_CACHE_TTL = int(os.getenv("DASHBOARD_CACHE_TTL", "30"))  # seconds
+    IMAGE_LIST_MAX_LIMIT = int(os.getenv("IMAGE_LIST_MAX_LIMIT", "100"))
 
     # Security Configuration
     ALLOWED_ORIGINS = os.getenv(

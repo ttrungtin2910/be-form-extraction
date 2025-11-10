@@ -1,6 +1,10 @@
 import uvicorn
 import os
 import uuid
+import asyncio
+import time
+import heapq
+from threading import Lock
 from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -49,7 +53,7 @@ from models.activity_log import ActivityLogResponse
 from middleware.user_auth import get_current_active_user, get_current_admin_user
 from middleware.activity_logger import ActivityLoggingMiddleware
 from datetime import timedelta
-from typing import Optional
+from typing import Optional, List
 
 from database.firestore import (
     db,
@@ -58,8 +62,10 @@ from database.firestore import (
     get_image,
     delete_image,
     list_images,
+    stream_images,
     upsert_folder,
     list_folders as firestore_list_folders,
+    count_images_in_folder,
     delete_folder as firestore_delete_folder,
     rename_folder as firestore_rename_folder,
 )
@@ -103,6 +109,10 @@ config.validate_required_config()
 # Initialize services
 bot = TicketChatBot(config)
 form_extraction_service = FormExtractionService(config)
+dashboard_cache_ttl = getattr(config, "DASHBOARD_CACHE_TTL", 30)
+recent_activity_limit = 20
+_dashboard_cache_lock = Lock()
+_dashboard_cache = {"data": None, "expires": 0.0}
 
 
 class ExtractFormData(BaseModel):
@@ -356,22 +366,63 @@ async def remove_image(
 
 
 @app.get("/images/")
-async def get_all_images(folderPath: str = "", page: int = 1, limit: int = 20):
+@limiter.limit(RATE_LIMIT_GENERAL)
+async def get_all_images(
+    request: Request,
+    folderPath: Optional[
+        str
+    ] = None,  # Changed default from "" to None to get all folders
+    page: int = 1,
+    limit: int = 20,
+    sortField: str = "CreatedAt",
+    sortOrder: str = "desc",
+):
     """
-    Retrieve image records. If folderPath provided, filter by that path.
-    """
-    # Sanitize folder path if provided
-    safe_folder_path = sanitize_folder_path(folderPath) if folderPath else None
+    Retrieve image records. If folderPath provided, filter by that path. Pagination and sorting are
+    handled at the database level for better performance.
 
-    # Use optimized Firestore query with filtering and pagination at database level
-    data, total = list_images(
-        config.COLLECTION_NAME_IMAGE_DETAIL,
-        folder_path=safe_folder_path,
-        page=page,
-        limit=limit,
+    folderPath: None = all folders, "" = root only, "FolderName" = specific folder
+    """
+    # Normalize folder path
+    if folderPath is None:
+        safe_folder_path: Optional[str] = "__all__"
+    elif folderPath == "":
+        safe_folder_path = ""
+    else:
+        safe_folder_path = sanitize_folder_path(folderPath)
+
+    allowed_sort_fields = {"CreatedAt", "ImageName", "Status", "Size"}
+    sort_field = sortField if sortField in allowed_sort_fields else "CreatedAt"
+    sort_order = (
+        sortOrder.lower()
+        if sortOrder and sortOrder.lower() in {"asc", "desc"}
+        else "desc"
     )
 
-    return {"data": data, "total": total}
+    try:
+        data, total = list_images(
+            config.COLLECTION_NAME_IMAGE_DETAIL,
+            folder_path=safe_folder_path,
+            page=page,
+            limit=limit,
+            sort_field=sort_field,
+            sort_order=sort_order,
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.error(f"Failed to list images: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch image list.",
+        )
+
+    return {
+        "data": data,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "sortField": sort_field,
+        "sortOrder": sort_order,
+    }
 
 
 # Folder endpoints
@@ -379,9 +430,33 @@ async def get_all_images(folderPath: str = "", page: int = 1, limit: int = 20):
 
 # Get folders
 @app.get("/folders/")
-async def list_folders():
-    folders = firestore_list_folders()
-    return {"folders": folders}
+async def list_folders(parent: Optional[str] = None, includeCount: bool = False):
+    """
+    Get folders, optionally filtered by parent path.
+
+    Args:
+        parent: Parent folder path. If None, return all folders.
+                If "", return only root-level folders.
+        includeCount: If True, include image count for each folder.
+
+    Returns:
+        List of folders with optional image counts
+    """
+    try:
+        folders_data = firestore_list_folders(parent_path=parent)
+
+        if includeCount:
+            # Add image count for each folder
+            for folder in folders_data:
+                folder_path = folder.get("FolderPath", "")
+                folder["imageCount"] = count_images_in_folder(
+                    config.COLLECTION_NAME_IMAGE_DETAIL, folder_path
+                )
+
+        return {"folders": folders_data, "total": len(folders_data)}
+    except Exception as e:
+        logger.error(f"Error listing folders: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # Create folder
@@ -825,6 +900,163 @@ async def cleanup_old_activity_logs(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to cleanup activity logs",
+        )
+
+
+def _compute_dashboard_statistics() -> dict:
+    status_counts: dict[str, int] = {}
+    folder_counts: dict[str, int] = {}
+    by_date: dict[str, int] = {}
+    total_size = 0.0
+    total_images = 0
+    recent_heap: List[tuple[str, str, dict]] = []
+
+    select_fields = [
+        "Status",
+        "FolderPath",
+        "Size",
+        "CreatedAt",
+        "ImageName",
+        "ImagePath",
+    ]
+    for img in stream_images(config.COLLECTION_NAME_IMAGE_DETAIL, select_fields):
+        total_images += 1
+
+        status = img.get("Status") or "Unknown"
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+        folder_key = img.get("FolderPath") or ""
+        folder_counts[folder_key or "Root"] = (
+            folder_counts.get(folder_key or "Root", 0) + 1
+        )
+
+        size_val = img.get("Size", 0.0) or 0.0
+        total_size += size_val
+
+        created_at = img.get("CreatedAt") or ""
+        if created_at:
+            date_key = created_at[:8] if len(created_at) >= 8 else "Unknown"
+            by_date[date_key] = by_date.get(date_key, 0) + 1
+
+        heapq.heappush(recent_heap, (created_at, img.get("ImageName", ""), img))
+        if len(recent_heap) > recent_activity_limit:
+            heapq.heappop(recent_heap)
+
+    avg_size = round(total_size / total_images, 2) if total_images else 0.0
+
+    summary = {
+        "totalImages": total_images,
+        "uploaded": status_counts.get("Uploaded", 0),
+        "processing": status_counts.get("Processing", 0),
+        "completed": status_counts.get("Completed", 0),
+        "failed": status_counts.get("Failed", 0),
+        "totalSize": round(total_size, 2),
+        "avgSize": avg_size,
+    }
+
+    by_status = [
+        {"status": status, "count": count}
+        for status, count in sorted(status_counts.items(), key=lambda item: item[0])
+    ]
+    by_folder = [
+        {"folder": folder, "count": count}
+        for folder, count in sorted(folder_counts.items(), key=lambda item: item[0])
+    ]
+    by_date_list = [
+        {"date": date_key, "count": count}
+        for date_key, count in sorted(by_date.items())
+    ]
+    recent_activity = [
+        entry[2]
+        for entry in sorted(recent_heap, key=lambda item: item[0], reverse=True)
+    ]
+
+    return {
+        "summary": summary,
+        "byStatus": by_status,
+        "byFolder": by_folder,
+        "byDate": by_date_list,
+        "recentActivity": recent_activity,
+    }
+
+
+def _get_dashboard_stats_cached(force_refresh: bool = False) -> dict:
+    now = time.time()
+    with _dashboard_cache_lock:
+        if (
+            not force_refresh
+            and _dashboard_cache["data"] is not None
+            and now < _dashboard_cache["expires"]
+        ):
+            return _dashboard_cache["data"]
+
+    stats = _compute_dashboard_statistics()
+
+    with _dashboard_cache_lock:
+        _dashboard_cache["data"] = stats
+        _dashboard_cache["expires"] = now + dashboard_cache_ttl
+
+    return stats
+
+
+def _prepare_export_payload() -> dict:
+    image_fields = [
+        "Status",
+        "ImageName",
+        "ImagePath",
+        "CreatedAt",
+        "FolderPath",
+        "Size",
+    ]
+    images = list(stream_images(config.COLLECTION_NAME_IMAGE_DETAIL, image_fields))
+
+    form_docs = {
+        doc.get("ImageName"): doc.get("analysis_result")
+        for doc in stream_images(
+            config.COLLECTION_NAME_FORM_EXTRACT, ["ImageName", "analysis_result"]
+        )
+        if doc.get("analysis_result") is not None
+    }
+
+    for img in images:
+        analysis = form_docs.get(img.get("ImageName"))
+        if analysis is not None:
+            img["analysis_result"] = analysis
+
+    return {"total": len(images), "images": images}
+
+
+@app.get("/statistics/dashboard")
+async def get_dashboard_statistics(forceRefresh: bool = False):
+    """
+    Get comprehensive dashboard statistics including all images across all folders.
+    Utilises caching to avoid repetitive heavy aggregation queries.
+    """
+    try:
+        stats = await asyncio.to_thread(_get_dashboard_stats_cached, forceRefresh)
+        return stats
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.error(f"Error getting dashboard statistics: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to build dashboard statistics.",
+        )
+
+
+@app.get("/statistics/export-all")
+async def export_all_images_data():
+    """
+    Get all images with full details including analysis results for export.
+    """
+    try:
+        payload = await asyncio.to_thread(_prepare_export_payload)
+        logger.info(f"Export prepared with {payload['total']} images.")
+        return payload
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.error(f"Error exporting all images data: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to export image data.",
         )
 
 
