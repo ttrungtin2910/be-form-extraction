@@ -123,6 +123,8 @@ def list_images(
     limit: int = 20,
     sort_field: str = DEFAULT_SORT_FIELD,
     sort_order: str = "desc",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> Tuple[List[dict], int]:
     """
     Retrieve image documents from the Firestore collection with optional filtering and pagination.
@@ -157,6 +159,18 @@ def list_images(
         normalized_folder = folder_path
         base_query = base_query.where(filter=FieldFilter("FolderPath", "==", normalized_folder))
 
+    # Filter by date range if provided
+    # CreatedAt format: YYYYMMDD_HHMMSS_microseconds
+    if start_date:
+        # Convert YYYY-MM-DD to YYYYMMDD format for comparison
+        start_date_str = start_date.replace("-", "")
+        base_query = base_query.where(filter=FieldFilter("CreatedAt", ">=", start_date_str))
+    
+    if end_date:
+        # Convert YYYY-MM-DD to YYYYMMDD format and add end of day
+        end_date_str = end_date.replace("-", "") + "_235959_999999"
+        base_query = base_query.where(filter=FieldFilter("CreatedAt", "<=", end_date_str))
+
     ordered_query = base_query.order_by(sort_field, direction=sort_direction)
 
     try:
@@ -183,7 +197,21 @@ def list_images(
             ["Status", "ImageName", "ImagePath", "CreatedAt", "FolderPath", "Size"]
         )
         for doc in fallback_query.stream():
-            raw_docs.append(_normalize_image_dict(doc.to_dict()))
+            doc_dict = _normalize_image_dict(doc.to_dict())
+            created_at = doc_dict.get("CreatedAt", "")
+            
+            # Filter by date range in Python if not already filtered in query
+            if start_date:
+                start_date_str = start_date.replace("-", "")
+                if created_at[:8] < start_date_str:
+                    continue
+            
+            if end_date:
+                end_date_str = end_date.replace("-", "")
+                if created_at[:8] > end_date_str:
+                    continue
+            
+            raw_docs.append(doc_dict)
 
         total = len(raw_docs)
         reverse = sort_order.lower() != "asc"

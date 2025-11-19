@@ -19,6 +19,8 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
+from functools import lru_cache
+from typing import Dict, Optional
 
 # from middleware.auth import verify_api_key  # No longer needed - using user authentication
 from middleware.rate_limiter import (
@@ -89,6 +91,41 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Firestore Image Metadata API")
 
+# In-memory cache for form extract information
+# Structure: {image_name: {"data": result, "timestamp": timestamp}}
+_form_extract_cache: Dict[str, Dict] = {}
+_cache_lock = Lock()
+CACHE_TTL_SECONDS = 300  # 5 minutes
+
+
+def _get_cached_result(image_name: str) -> Optional[dict]:
+    """Get cached result if still valid."""
+    with _cache_lock:
+        cached = _form_extract_cache.get(image_name)
+        if cached:
+            age = time.time() - cached["timestamp"]
+            if age < CACHE_TTL_SECONDS:
+                return cached["data"]
+            else:
+                # Remove expired cache entry
+                del _form_extract_cache[image_name]
+    return None
+
+
+def _set_cached_result(image_name: str, data: dict):
+    """Set cache entry."""
+    with _cache_lock:
+        _form_extract_cache[image_name] = {
+            "data": data,
+            "timestamp": time.time(),
+        }
+
+
+def _clear_cache_entry(image_name: str):
+    """Clear a specific cache entry (e.g., after update)."""
+    with _cache_lock:
+        _form_extract_cache.pop(image_name, None)
+
 # Add rate limiting
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
@@ -128,6 +165,11 @@ class GetFormInfoData(BaseModel):
     # Accept either 'title' (original spec) or 'ImageName' (frontend usage) for flexibility
     title: str | None = None
     ImageName: str | None = None
+
+
+class GetFormInfoBatchData(BaseModel):
+    """Request model for batch fetching form extract information."""
+    ImageNames: List[str]
 
 
 class FolderCreateData(BaseModel):
@@ -376,6 +418,8 @@ async def get_all_images(
     limit: int = 20,
     sortField: str = "CreatedAt",
     sortOrder: str = "desc",
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
 ):
     """
     Retrieve image records. If folderPath provided, filter by that path. Pagination and sorting are
@@ -407,6 +451,8 @@ async def get_all_images(
             limit=limit,
             sort_field=sort_field,
             sort_order=sort_order,
+            start_date=startDate,
+            end_date=endDate,
         )
     except Exception as exc:  # pragma: no cover - defensive logging
         logger.error(f"Failed to list images: {exc}")
@@ -545,6 +591,7 @@ async def get_form_extract_information(data: GetFormInfoData):
     """
     Receive an image title via JSON and fetch corresponding metadata
     from Firestore using the `get_image` helper function.
+    Uses in-memory cache to reduce Firestore queries.
 
     Args:
         data (GetFormInfoData): Object containing the image title
@@ -557,6 +604,12 @@ async def get_form_extract_information(data: GetFormInfoData):
         raise HTTPException(status_code=422, detail="Missing 'title' or 'ImageName'")
     logger.info(f"Received request to get form extract information for title: {name}")
 
+    # Check cache first
+    cached_result = _get_cached_result(name)
+    if cached_result is not None:
+        logger.info(f"Returning cached form extract data for {name}")
+        return cached_result
+
     try:
         # Call helper to fetch image data from Firestore
         result = get_image(
@@ -568,6 +621,9 @@ async def get_form_extract_information(data: GetFormInfoData):
             logger.warning(f"No form extract data found for title: {name}")
             raise HTTPException(status_code=404, detail="Image not found")
 
+        # Cache the result
+        _set_cached_result(name, result)
+
         logger.info(f"Returning form extract data for {name}")
         return result
     except HTTPException:
@@ -575,6 +631,60 @@ async def get_form_extract_information(data: GetFormInfoData):
     except Exception as e:
         logger.error(f"Error getting form extract information for {name}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.post("/GetFormExtractInformationBatch")
+async def get_form_extract_information_batch(data: GetFormInfoBatchData):
+    """
+    Batch fetch form extract information for multiple images.
+    Uses cache to avoid redundant Firestore queries.
+
+    Args:
+        data (GetFormInfoBatchData): Object containing list of ImageNames
+
+    Returns:
+        JSON response containing list of results for each image.
+    """
+    if not data.ImageNames or len(data.ImageNames) == 0:
+        raise HTTPException(status_code=422, detail="ImageNames list cannot be empty")
+    
+    if len(data.ImageNames) > 100:  # Limit batch size
+        raise HTTPException(status_code=422, detail="Batch size cannot exceed 100 images")
+    
+    logger.info(f"Received batch request for {len(data.ImageNames)} images")
+
+    results = {}  # Use dict with ImageName as key
+    images_to_fetch = []
+
+    # Check cache for each image
+    for image_name in data.ImageNames:
+        cached_result = _get_cached_result(image_name)
+        if cached_result is not None:
+            results[image_name] = cached_result
+        else:
+            images_to_fetch.append(image_name)
+
+    # Fetch uncached images from Firestore
+    if images_to_fetch:
+        logger.info(f"Fetching {len(images_to_fetch)} uncached images from Firestore")
+        for image_name in images_to_fetch:
+            try:
+                result = get_image(
+                    image_name=image_name,
+                    collection_name=config.COLLECTION_NAME_FORM_EXTRACT
+                )
+                if result:
+                    _set_cached_result(image_name, result)
+                    results[image_name] = result
+                else:
+                    # Return null for not found images instead of raising error
+                    results[image_name] = None
+            except Exception as e:
+                logger.error(f"Error fetching {image_name}: {str(e)}")
+                results[image_name] = None
+
+    logger.info(f"Returning batch results for {len(results)} images")
+    return {"results": results, "count": len(results)}
 
 
 @app.post("/queue/upload-image")
@@ -999,7 +1109,7 @@ def _get_dashboard_stats_cached(force_refresh: bool = False) -> dict:
     return stats
 
 
-def _prepare_export_payload() -> dict:
+def _prepare_export_payload(start_date: Optional[str] = None, end_date: Optional[str] = None) -> dict:
     image_fields = [
         "Status",
         "ImageName",
@@ -1008,7 +1118,28 @@ def _prepare_export_payload() -> dict:
         "FolderPath",
         "Size",
     ]
-    images = list(stream_images(config.COLLECTION_NAME_IMAGE_DETAIL, image_fields))
+    
+    # Filter by date range if provided
+    all_images = list(stream_images(config.COLLECTION_NAME_IMAGE_DETAIL, image_fields))
+    filtered_images = []
+    
+    for img in all_images:
+        created_at = img.get("CreatedAt", "")
+        
+        # Filter by date range
+        if start_date:
+            start_date_str = start_date.replace("-", "")
+            if created_at[:8] < start_date_str:
+                continue
+        
+        if end_date:
+            end_date_str = end_date.replace("-", "")
+            if created_at[:8] > end_date_str:
+                continue
+        
+        filtered_images.append(img)
+    
+    images = filtered_images
 
     form_docs = {
         doc.get("ImageName"): doc.get("analysis_result")
@@ -1044,12 +1175,16 @@ async def get_dashboard_statistics(forceRefresh: bool = False):
 
 
 @app.get("/statistics/export-all")
-async def export_all_images_data():
+async def export_all_images_data(
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
+):
     """
     Get all images with full details including analysis results for export.
+    Can be filtered by date range.
     """
     try:
-        payload = await asyncio.to_thread(_prepare_export_payload)
+        payload = await asyncio.to_thread(_prepare_export_payload, startDate, endDate)
         logger.info(f"Export prepared with {payload['total']} images.")
         return payload
     except Exception as exc:  # pragma: no cover - defensive logging
